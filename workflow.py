@@ -23,7 +23,7 @@ class AppConfig:
     model: str = field(default_factory=lambda: os.environ.get("LLM_MODEL", "deepseek-chat"))
     kicad_cli_path: str = field(default_factory=lambda: os.environ.get("KICAD_CLI_PATH", ""))
     max_pdf_pages_to_send: int = 8  # Защита от переполнения контекста и лишней траты токенов
-    temperature: float = 0.05       # Минимальная температура для строгой детерминированности
+    temperature: float = 0.00       # Минимальная температура для строгой детерминированности
 
 
 # =====================================================================
@@ -240,13 +240,31 @@ class KiCadSymbolGenerator:
         """
         safe_name = re.sub(r"[^\w\-_.]", "_", component_name.strip()) or "Generated_IC"
 
+        # Умное распределение для больших MCU (> 30 пинов), если сторона не задана жестко ИИ
+        total_pins_count = len(pins)
+        for p in pins:
+            # Если чип большой, перераспределяем порты по сторонам для баланса высоты
+            if total_pins_count > 30 and "side" not in p:
+                name_up = str(p.get("name", "")).upper()
+                if any(k in name_up for k in ("VCC", "VDD", "VSS", "GND", "VBAT", "VDDA", "VSSA", "NRST", "BOOT", "OSC", "VREF")):
+                    p["side"] = "left"
+                elif name_up.startswith("P") and len(name_up) > 1 and name_up[1] in ("C", "D", "E", "F", "G"):
+                    p["side"] = "left"  # Порты C, D, E уходят налево вниз
+                else:
+                    p["side"] = "right" # Порты A, B остаются справа
+
         left_pins = [p for p in pins if str(p.get("side", "left")).lower() == "left"]
         right_pins = [p for p in pins if str(p.get("side", "left")).lower() != "left"]
 
+        # Балансировка, если одна из сторон пуста
         if not right_pins and len(left_pins) > 2:
             mid = (len(left_pins) + 1) // 2
             right_pins = left_pins[mid:]
             left_pins = left_pins[:mid]
+        elif not left_pins and len(right_pins) > 2:
+            mid = (len(right_pins) + 1) // 2
+            left_pins = right_pins[:mid]
+            right_pins = right_pins[mid:]
 
         # Классификация левых выводов: 0 - Питание (+), 1 - Системные, 2 - Земля (GND)
         def get_left_group(p) -> int:
@@ -403,6 +421,9 @@ class KiCadWorkflowEngine:
             "   - 'system' (RESET, XTAL, OSC, CLK, BOOT, AREF) -> side: 'left'\n"
             "   - 'power_gnd' (GND, VSS, AGND, PGND) -> side: 'left'\n"
             "   - 'port_a', 'port_b', 'port_c', 'port_d', 'io', 'data' (порты GPIO и интерфейсы) -> side: 'right'\n\n"
+            "СТРОГИЕ ПРАВИЛА:\n"
+            "1. Извлекай пины СТРОГО для указанного корпуса (например, LQFP-48). Если в таблице несколько столбцов под разные корпуса, бери данные только для запрошенного корпуса и игнорируй остальные!\n"
+            "2. Общее количество выводов (`expected_pin_count`) должно строго соответствовать этому корпусу (например, 48 для LQFP-48).\n"
             "Верни СТРОГО валидный JSON:\n"
             "{\n"
             '  "audit": {"selected_package": "DIP-28", "expected_pin_count": 28, "extracted_pin_count": 28, "missing_or_fixed_notes": ""},\n'
